@@ -1,0 +1,178 @@
+---
+title: "Random_forest_model"
+author: "Xirun Tang"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import the cleaned data
+
+
+```{r}
+data <- read.csv("trainnew.csv")
+```
+
+## load necessary packages
+
+
+```{r}
+library(dplyr)
+library(randomForest)
+library(ROCR)
+```
+
+```{r}
+# Convert 'issueDate' from character to Date
+data$issueDate <- as.Date(data$issueDate, format="%Y-%m-%d")
+
+# Convert character variables to factors (if they represent categorical data)
+data$subGrade <- as.factor(data$subGrade)
+data$grade <- as.factor(data$grade)
+
+
+# Delete the row X
+data <- data[, -which(names(data) == "X")]
+
+set.seed(123)  # For reproducibility
+
+# Calculate the number of observations to include in the test set
+test_size <- ceiling(0.25 * nrow(data))
+
+# Randomly select indices for the test set
+test_indices <- sample(1:nrow(data), test_size)
+
+# Create test and training sets
+test_set <- data[test_indices, ]
+train_set <- data[-test_indices, ]
+
+train_set$isDefault <- as.factor(train_set$isDefault)
+test_set$isDefault <- as.factor(test_set$isDefault)
+
+```
+
+```{r}
+# Count the number of instances for each class in 'isDefault'
+table(train_set$isDefault)
+
+# Calculate proportions for each class
+prop.table(table(train_set$isDefault))
+```
+
+
+
+
+## Make a balanced dataframe
+
+```{r}
+# Function to create a balanced dataset by undersampling
+create_balanced_dataset <- function(data, seed) {
+  set.seed(seed)
+  class_0 <- filter(data, isDefault == 0)
+  class_1 <- filter(data, isDefault == 1)
+  
+  class_0_sampled <- sample_n(class_0, size = nrow(class_1))
+  balanced_train <- bind_rows(class_0_sampled, class_1)
+  
+  return(balanced_train[sample(nrow(balanced_train)),])  # Shuffle rows
+}
+
+# Create multiple datasets
+balanced_train1 <- create_balanced_dataset(train_set, seed = 101)
+balanced_train2 <- create_balanced_dataset(train_set, seed = 102)
+balanced_train3 <- create_balanced_dataset(train_set, seed = 103)
+```
+
+## Random Forest model
+
+```{r}
+# Train the model
+rf_model_1 <- randomForest(isDefault ~., data = balanced_train1, ntree = 100)
+rf_model_2 <- randomForest(isDefault ~., data = balanced_train2, ntree = 100)
+rf_model_3 <- randomForest(isDefault ~., data = balanced_train3, ntree = 100)
+
+test_predictions1 <- predict(rf_model_1, test_set)
+test_predictions2 <- predict(rf_model_2, test_set)
+test_predictions3 <- predict(rf_model_3, test_set)
+
+# Adjust the metrics calculation for each model
+evaluate_model <- function(model, test_set) {
+    test_predictions <- predict(model, test_set)
+    confusion_matrix <- table(test_set$isDefault, test_predictions)
+    precision <- confusion_matrix[2,2] / sum(confusion_matrix[,2])
+    recall <- confusion_matrix[2,2] / sum(confusion_matrix[2,])
+    f1_score <- 2 * precision * recall / (precision + recall)
+    accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  
+    cat("Accuracy:", accuracy, "\n")
+    cat("Precision:", precision, "\n")
+    cat("Recall:", recall, "\n")
+    cat("F1 Score:", f1_score, "\n")
+}
+
+# Evaluate each model
+cat("Model 1 Metrics:\n")
+evaluate_model(rf_model_1, test_set)
+cat("\nModel 2 Metrics:\n")
+evaluate_model(rf_model_2, test_set)
+cat("\nModel 3 Metrics:\n")
+evaluate_model(rf_model_3, test_set)
+```
+
+
+## ROC Curve
+```{r}
+library(ROCR)
+plot_roc_and_auc <- function(model, test_set, col) {
+    probabilities <- predict(model, test_set, type = "prob")
+    prob_pos <- probabilities[, "1"]
+    pred <- prediction(prob_pos, test_set$isDefault)
+    roc <- performance(pred, "tpr", "fpr")
+    auc <- performance(pred, measure = "auc")
+    auc_value <- auc@y.values[[1]]
+    
+    plot(roc, col = col, add = TRUE, lwd = 2)
+    cat("AUC for model:", auc_value, "\n")
+    return(auc_value)
+}
+
+# Initial plot setup
+plot(0, type = "n", xlab = "False Positive Rate (FPR)", ylab = "True Positive Rate (TPR)", xlim = c(0, 1), ylim = c(0, 1), main = "Comparison of ROC Curves")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# Plot ROC for each model
+aucs <- c(
+    plot_roc_and_auc(rf_model_1, test_set, "red"),
+    plot_roc_and_auc(rf_model_2, test_set, "blue"),
+    plot_roc_and_auc(rf_model_3, test_set, "green")
+)
+
+# Add a legend
+legend("bottomright", legend = c("Model 1", "Model 2", "Model 3"), col = c("red", "blue", "green"), lwd = 2)
+```
+
+
+```{r}
+# Predict probabilities
+probabilities <- predict(rf_model_1, test_set, type = "prob")
+prob_pos <- probabilities[, "1"]
+
+# Order the predictions by probability of being class 1
+ordered_indices <- order(prob_pos, decreasing = TRUE)
+ordered_actuals <- test_set$isDefault[ordered_indices]
+
+# Compute precision at different levels of K
+k_values <- seq(1, length(ordered_actuals), by = 100)  # Adjust step size as needed
+precision_at_k <- sapply(k_values, function(k) {
+    predicted_positives_k <- ordered_actuals[1:k]
+    sum(predicted_positives_k == 1) / k
+})
+
+# Plotting Precision at K
+plot(k_values, precision_at_k, type = "o", pch = 19, col = "blue", xlab = "Top K cases", ylab = "Precision at K", main = "Precision at K Curve")
+lines(k_values, precision_at_k, col = "blue")  # Connect points with lines
+
+```
